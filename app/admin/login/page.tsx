@@ -18,7 +18,7 @@ export default function LoginPage() {
     const result = await loginAction(email, password)
     setLoading(false)
     if (result.error) {
-      setError('Credenziali non valide')
+      setError(result.error ?? 'Errore sconosciuto')
     } else {
       router.push('/admin')
       router.refresh()
