@@ -4,6 +4,10 @@
   --font-dm-sans: 'DM Sans', sans-serif;
 }
 
+@theme {
+  --font-family-sans: var(--font-dm-sans);
+}
+
 * {
   box-sizing: border-box;
 }
