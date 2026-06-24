@@ -1,0 +1,23 @@
+[Unit]
+Description=Loveskin NovaStar Agent — bridges Supabase commands to TB50 LED wall controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=loveskin
+WorkingDirectory=/opt/loveskin-agent
+EnvironmentFile=/opt/loveskin-agent/.env
+ExecStart=/usr/bin/node /opt/loveskin-agent/agent.mjs
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (safe defaults — relax if needed)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

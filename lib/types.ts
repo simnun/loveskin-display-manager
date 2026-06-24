@@ -7,6 +7,33 @@ export interface Display {
   active: boolean
   created_at: string
   updated_at: string
+  // LED wall control (TB50 via Raspberry agent)
+  power_state: 'on' | 'off'
+  brightness: number
+  schedule_on: string | null
+  schedule_off: string | null
+  schedule_enabled: boolean
+  agent_last_seen: string | null
+  agent_ip: string | null
+  has_signal: boolean | null
+}
+
+export type DisplayCommandName =
+  | 'power_on'
+  | 'power_off'
+  | 'set_brightness'
+  | 'freeze'
+  | 'normal'
+
+export interface DisplayCommand {
+  id: string
+  display_id: string
+  command: DisplayCommandName
+  payload: Record<string, unknown> | null
+  status: 'pending' | 'done' | 'error'
+  error: string | null
+  created_at: string
+  executed_at: string | null
 }
 
 export interface Media {
