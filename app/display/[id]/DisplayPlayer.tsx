@@ -4,10 +4,23 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import type { Display, PublishedItem, Media } from '@/lib/types'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const R2_PUBLIC_URL = process.env.NEXT_PUBLIC_R2_PUBLIC_URL!
 
 function mediaUrl(displayId: string, filename: string) {
-  return `${SUPABASE_URL}/storage/v1/object/public/media/${displayId}/${filename}`
+  return `${R2_PUBLIC_URL}/${displayId}/${filename}`
+}
+
+function urlsOf(items: PublishedItem[], displayId: string) {
+  return items
+    .map(it => (it.media as unknown as Media | undefined)?.filename)
+    .filter((f): f is string => !!f)
+    .map(f => `${R2_PUBLIC_URL}/${displayId}/${f}`)
+}
+
+function sameUrlSet(a: string[], b: string[]) {
+  if (a.length !== b.length) return false
+  const s = new Set(a)
+  return b.every(u => s.has(u))
 }
 
 export default function DisplayPlayer({ displayId, initialDisplay, initialItems }: {
@@ -17,7 +30,10 @@ export default function DisplayPlayer({ displayId, initialDisplay, initialItems 
 }) {
   const supabase = createClient()
   const [display, setDisplay] = useState<Display | null>(initialDisplay)
-  const [items, setItems] = useState<PublishedItem[]>(initialItems)
+  const [items, setItems] = useState<PublishedItem[]>([])
+  const [pendingItems, setPendingItems] = useState<PublishedItem[]>(initialItems)
+  const [preparing, setPreparing] = useState(true)
+  const [prepProgress, setPrepProgress] = useState<string>('')
   const [currentIdx, setCurrentIdx] = useState(0)
   const [visible, setVisible] = useState(true)
 
@@ -25,42 +41,113 @@ export default function DisplayPlayer({ displayId, initialDisplay, initialItems 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const swReadyRef = useRef<Promise<ServiceWorker | null>>(
+    Promise.resolve(null)
+  )
 
   const currentItem = items[currentIdx]
   const currentMedia = currentItem?.media as unknown as Media | undefined
+
+  // Register service worker once
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!('serviceWorker' in navigator)) {
+      swReadyRef.current = Promise.resolve(null)
+      return
+    }
+    swReadyRef.current = navigator.serviceWorker
+      .register('/sw.js')
+      .then(() => navigator.serviceWorker.ready)
+      .then(reg => reg.active ?? navigator.serviceWorker.controller ?? null)
+      .catch(() => null)
+  }, [])
+
+  // Prepare cache whenever pendingItems changes: download missing, delete obsolete, then swap.
+  useEffect(() => {
+    let cancelled = false
+    const urls = urlsOf(pendingItems, displayId)
+
+    // Nothing to cache (empty playlist) → swap immediately
+    if (urls.length === 0) {
+      setItems(pendingItems)
+      setPreparing(false)
+      return
+    }
+
+    // If pending matches what's already playing, no-op
+    if (sameUrlSet(urls, urlsOf(items, displayId)) && items.length > 0) return
+
+    // Only show "preparing" overlay on first load (when nothing is playing yet)
+    if (items.length === 0) {
+      setPreparing(true)
+      setPrepProgress('Preparazione contenuti...')
+    }
+
+    swReadyRef.current.then(sw => {
+      if (cancelled) return
+      if (!sw) {
+        // SW unsupported/failed → play direct from network
+        setItems(pendingItems)
+        setPreparing(false)
+        return
+      }
+      const channel = new MessageChannel()
+      channel.port1.onmessage = e => {
+        if (cancelled) return
+        const r = e.data
+        if (r?.type === 'PREPARE_DONE') {
+          if (r.failed > 0 && r.downloaded + r.reused === 0) {
+            // total failure: keep old playlist playing, will retry on next update
+            setPrepProgress('Rete non disponibile. Riprovo...')
+          } else {
+            setItems(pendingItems)
+            setPreparing(false)
+            setPrepProgress('')
+          }
+        }
+      }
+      sw.postMessage({ type: 'PREPARE_PLAYLIST', urls }, [channel.port2])
+    })
+
+    return () => { cancelled = true }
+  }, [pendingItems, displayId, items])
+
+  const lastUpdatedRef = useRef<string | null>(initialDisplay?.updated_at ?? null)
 
   const fetchLatest = useCallback(async () => {
     const [{ data: d }, { data: i }] = await Promise.all([
       supabase.from('displays').select('*').eq('id', displayId).single(),
       supabase.from('published_items').select('*, media(*)').eq('display_id', displayId).order('position'),
     ])
-    if (d) setDisplay(d as Display)
-    if (i) setItems(i as PublishedItem[])
+    if (d) {
+      setDisplay(d as Display)
+      lastUpdatedRef.current = (d as Display).updated_at
+    }
+    if (i) setPendingItems(i as PublishedItem[])
   }, [supabase, displayId])
 
-  // Realtime subscription + polling fallback
+  // Lightweight polling: every 60s ask only for displays.updated_at (~500B response).
+  // If it changed, do the full fetch. No Realtime WebSocket → zero idle traffic.
   useEffect(() => {
-    let realtimeOk = false
+    const checkForUpdates = async () => {
+      const { data, error } = await supabase
+        .from('displays')
+        .select('updated_at')
+        .eq('id', displayId)
+        .single()
+      if (error || !data) return
+      if (data.updated_at !== lastUpdatedRef.current) {
+        await fetchLatest()
+      }
+    }
 
-    const ch = supabase.channel(`display-${displayId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'published_items', filter: `display_id=eq.${displayId}` }, fetchLatest)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'displays', filter: `id=eq.${displayId}` }, fetchLatest)
-      .subscribe(status => {
-        realtimeOk = status === 'SUBSCRIBED'
-      })
-
-    // Polling fallback every 30s
-    pollRef.current = setInterval(() => {
-      if (!realtimeOk) fetchLatest()
-    }, 30000)
-
+    pollRef.current = setInterval(checkForUpdates, 60000)
     return () => {
-      supabase.removeChannel(ch)
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [supabase, displayId, fetchLatest])
 
-  // Reset to idx 0 when items change (but keep current if still valid)
+  // Reset idx when items change
   useEffect(() => {
     setCurrentIdx(prev => (items.length > 0 && prev < items.length ? prev : 0))
   }, [items])
@@ -74,7 +161,6 @@ export default function DisplayPlayer({ displayId, initialDisplay, initialItems 
     }, 600)
   }, [items.length])
 
-  // Photo timer
   useEffect(() => {
     if (!currentItem || currentMedia?.type !== 'photo') return
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -118,6 +204,7 @@ export default function DisplayPlayer({ displayId, initialDisplay, initialItems 
   }
 
   const isActive = display?.active && items.length > 0
+  const showPreparing = preparing && items.length === 0 && pendingItems.length > 0
 
   return (
     <div
@@ -125,7 +212,12 @@ export default function DisplayPlayer({ displayId, initialDisplay, initialItems 
       className="w-screen h-screen bg-black overflow-hidden cursor-none select-none"
       style={{ userSelect: 'none' }}
     >
-      {!isActive ? (
+      {showPreparing ? (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-3">
+          <div className="w-8 h-8 border-2 border-[#333] border-t-[#888] rounded-full animate-spin" />
+          <p className="text-[#555] text-sm font-medium">{prepProgress || 'Preparazione contenuti...'}</p>
+        </div>
+      ) : !isActive ? (
         <div className="w-full h-full flex items-center justify-center">
           <p className="text-[#333] text-sm font-medium">In attesa del contenuto...</p>
         </div>

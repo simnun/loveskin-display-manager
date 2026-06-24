@@ -1,0 +1,21 @@
+{
+  "name": "loveskin-novastar-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Raspberry-side agent: relays Supabase commands to NovaStar TB50 via TCP.",
+  "scripts": {
+    "start": "node agent.mjs",
+    "test": "node test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@novastar/native": "^1.5.0",
+    "@novastar/net": "^1.5.0",
+    "@novastar/screen": "^1.5.0",
+    "@supabase/supabase-js": "^2.104.0",
+    "dotenv": "^16.4.5"
+  }
+}
